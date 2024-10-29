@@ -16,7 +16,7 @@ ydl_opts = {
 
     'outtmpl': location+'/%(title)s.%(ext)s',
 
-    'ffmpeg-location': r"/Library/Frameworks/Python.framework/Versions/3.12/bin/",
+    'ffmpeg-location': r"ffmpeg", #/Library/Frameworks/Python.framework/Versions/3.12/bin/
     'postprocessors': [{
         'key': 'FFmpegExtractAudio',
         'preferredcodec': 'mp3',

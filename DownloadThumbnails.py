@@ -5,7 +5,7 @@ import os
 URLS = sys.argv[1]
 location = sys.argv[2]
 
-message = r'yt-dlp --skip-download --write-thumbnail --ffmpeg-location "C:\Users\Alex\Music\W\code\ffmpeg-master-latest-win64-gpl\bin" --convert-thumbnails "jpg" '
+message = r'yt-dlp --skip-download --write-thumbnail --ffmpeg-location "ffmpeg" --convert-thumbnails "jpg" ' #C:\Users\Alex\Music\W\code\ffmpeg-master-latest-win64-gpl\bin
 
 os.chdir(location)
 os.system(message + URLS)

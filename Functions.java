@@ -5,6 +5,7 @@ import javafx.scene.control.TextField;
 import org.json.JSONObject;
 
 import java.io.*;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
 
@@ -20,9 +21,9 @@ public class Functions {
         // Variables to pass to the Python script
         try {
             // Specify the Python script path
-            String pythonScriptPath = "/Users/alexlee/Desktop/code/YTDLP/src/main/java/com/example/ytdlp/DownloadMusicAndThumbnails.py";
+            String pythonScriptPath = Paths.get( "DownloadMusicAndThumbnails.py").toString();
             // Create a process builder and add arguments
-            ProcessBuilder pb = new ProcessBuilder("/opt/homebrew/bin/python3", pythonScriptPath, url, dir);
+            ProcessBuilder pb = new ProcessBuilder("python3", pythonScriptPath, url, dir);
             Process process = pb.start();
 
             // Capture the output from the script
@@ -49,9 +50,9 @@ public class Functions {
         // Variables to pass to the Python script
         try {
             // Specify the Python script path
-            String pythonScriptPath = "/Users/alexlee/Desktop/code/YTDLP/src/main/java/com/example/ytdlp/DownloadThumbnails.py";
+            String pythonScriptPath = Paths.get( "DownloadThumbnails.py").toString();
             // Create a process builder and add arguments
-            ProcessBuilder pb = new ProcessBuilder("/opt/homebrew/bin/python3", pythonScriptPath, url, dir);
+            ProcessBuilder pb = new ProcessBuilder("python3", pythonScriptPath, url, dir);
             Process process = pb.start();
 
             // Capture the output from the script
