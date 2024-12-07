@@ -7,18 +7,14 @@ import javafx.scene.control.Label;
 import javafx.scene.control.TextField;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
-import org.json.JSONObject;
-import com.example.ytdlp.Functions;
-
-import java.io.*;
 
 public class Main extends Application {
 
     @Override
     public void start(Stage primaryStage) {
         String dir = "";
-        Button downloadVideosButton = new Button("Download videos");
-        downloadVideosButton.setOnAction(e -> downloadVideosFunction());
+        Button downloadAudiosButton = new Button("Download audios");
+        downloadAudiosButton.setOnAction(e -> downloadAudiosFunction());
 
         Button downloadThumbsButton = new Button("Download thumbnails only");
         downloadThumbsButton.setOnAction(e -> downloadThumbsFunction());
@@ -26,9 +22,12 @@ public class Main extends Application {
         Button mergeThumbsButton = new Button("Embed new thumbnail to video");
         mergeThumbsButton.setOnAction(e -> embedThumbsFunction());
 
+        Button downloadVideosButton = new Button("Download videos as mp4");
+        downloadVideosButton.setOnAction(e -> downloadVideosFunction());
+
         // Layout to hold the buttons
         VBox vbox = new VBox(10); // VBox with 10px spacing
-        vbox.getChildren().addAll(downloadVideosButton, downloadThumbsButton, mergeThumbsButton);
+        vbox.getChildren().addAll(downloadAudiosButton, downloadThumbsButton, mergeThumbsButton, downloadVideosButton);
 
         // Create and set the scene
         Scene scene = new Scene(vbox, 800, 800);
@@ -38,7 +37,7 @@ public class Main extends Application {
     }
 
     // Function for Button 1
-    private void downloadVideosFunction() {
+    private void downloadAudiosFunction() {
         Stage newWindow = new Stage();
 
         Label text = new Label("Enter YouTube URL");
@@ -149,6 +148,37 @@ public class Main extends Application {
         Scene newScene = new Scene(vbox, 750, 500);
         newWindow.setTitle("Embed Thumbnails");
         newWindow.setScene(newScene);
+        newWindow.show();
+    }
+
+    private void downloadVideosFunction() {
+        Stage newWindow = new Stage();
+
+        Label text = new Label("Enter YouTube URL");
+
+        TextField textField = new TextField();
+        textField.setPromptText("Youtube URL");
+
+        Button downloadButton = new Button("Download");
+        downloadButton.setOnAction(e -> Functions.ytdlpVideosFunction(textField));
+
+        Label label = new Label("Current directory:");
+        TextField curDir = new TextField();
+        curDir.setPromptText(retrieveData("viddir"));
+        Button changeDirButton = new Button("Change directory");
+        changeDirButton.setOnAction(e -> writeData("viddir", curDir.getText()));
+
+        VBox vbox = new VBox(10); // 10px spacing
+        vbox.getChildren().addAll(text, textField, downloadButton, label, curDir, changeDirButton);
+
+        // Set the scene for the new window
+        Scene newScene = new Scene(vbox, 750, 500);
+
+        // Set window title and scene, then show the window
+        newWindow.setTitle("Download");
+        newWindow.setScene(newScene);
+
+        // Show the new window
         newWindow.show();
     }
 

@@ -144,6 +144,35 @@ public class Functions {
         }
     }
 
+    public static void ytdlpVideosFunction(TextField textField) {
+        writeData("url", textField.getText());
+
+        String dir = retrieveData("viddir");
+        String url = retrieveData("url");
+        System.out.println("Directory: " + dir);
+        System.out.println("URL: " + url);
+
+        // Variables to pass to the Python script
+        try {
+            // Specify the Python script path
+            String pythonScriptPath = Paths.get( "DownloadVideos.py").toString();
+            // Create a process builder and add arguments
+            ProcessBuilder pb = new ProcessBuilder("python3", pythonScriptPath, url, dir);
+            Process process = pb.start();
+
+            // Capture the output from the script
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                System.out.println(line);
+            }
+
+            process.waitFor();
+        } catch (IOException | InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
+
     public static String retrieveData(String key) {
         StringBuilder jsonData = new StringBuilder();
         try (BufferedReader reader = new BufferedReader(new FileReader("data.json"))) {
