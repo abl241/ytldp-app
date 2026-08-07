@@ -81,7 +81,10 @@ _DEFAULTS: dict[str, Any] = {
     "panel_recent_height": "normal", # "normal" | "large" | "xlarge"
     "download_input_collapsed": False,
     "music_input_collapsed": False,
+    "download_options_collapsed": True,
+    "music_options_collapsed": True,
     "music_track_list_expanded": False,
+    "main_tab": "music",             # "music" | "download" | "embed" | "settings"
 
     # Main window size (restored on launch)
     "window_width": 1100,
@@ -188,6 +191,9 @@ class Settings:
                 ]
                 if legacy_blobs:
                     self._data["paste_urls"] = "\n".join(legacy_blobs)
+            # Search inputs are always visible in the current UI.
+            self._data["download_input_collapsed"] = False
+            self._data["music_input_collapsed"] = False
             snapshot = json.dumps(self._data, indent=2)
         # If anything changed during the load (migration), persist it.
         self._flush(snapshot)

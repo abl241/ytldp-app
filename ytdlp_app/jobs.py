@@ -1,11 +1,12 @@
 """Concurrent job queue for downloads and embed tasks.
 
-A `JobQueue` owns a bounded `ThreadPoolExecutor` plus an in-process pending
-list. Callers `enqueue(...)` a `Job` describing one unit of work; the queue
-finds a free worker (or queues the job until one frees up) and runs the
-appropriate function from `downloader` / `embed`. Job state mutations are
-delivered to a single listener callback which is responsible for marshaling
-them to the Tk main thread.
+A `JobQueue` owns two bounded `ThreadPoolExecutor`s — one for downloads /
+postprocess, and a separate pool for search / resolve / match — plus an
+in-process pending list. Search never waits behind a download (and vice
+versa). Callers `enqueue(...)` a `Job`; the queue runs the appropriate
+function from `downloader` / `embed` / `search`. Job state mutations are
+delivered to a single listener callback which marshals them to the Tk
+main thread.
 """
 
 from __future__ import annotations
@@ -31,6 +32,16 @@ RUNNING = "running"
 DONE = "done"
 FAILED = "failed"
 CANCELLED = "cancelled"
+
+# Jobs that must not compete with download workers for slots.
+_SEARCH_KINDS = frozenset({
+    "search",
+    "search_more",
+    "resolve",
+    "source_resolve",
+    "source_match_all",
+})
+_DEFAULT_SEARCH_WORKERS = 2
 
 
 @dataclass
@@ -70,12 +81,23 @@ Listener = Callable[[Job], None]
 # ------------------------------- the queue ------------------------------- #
 
 class JobQueue:
-    def __init__(self, max_parallel: int, listener: Listener) -> None:
+    def __init__(
+        self,
+        max_parallel: int,
+        listener: Listener,
+        *,
+        max_search_parallel: int = _DEFAULT_SEARCH_WORKERS,
+    ) -> None:
         self._max_parallel = max(1, int(max_parallel))
+        self._max_search_parallel = max(1, int(max_search_parallel))
         self._listener = listener
         self._executor = ThreadPoolExecutor(
             max_workers=self._max_parallel,
-            thread_name_prefix="ytdlp-job",
+            thread_name_prefix="ytdlp-dl",
+        )
+        self._search_executor = ThreadPoolExecutor(
+            max_workers=self._max_search_parallel,
+            thread_name_prefix="ytdlp-search",
         )
         self._id_seq = itertools.count(1)
         self._lock = threading.Lock()
@@ -85,18 +107,24 @@ class JobQueue:
     # --------- pool configuration --------- #
 
     def set_max_parallel(self, n: int) -> None:
-        """Change the worker count. The old executor finishes its current
-        jobs in the background; new jobs go to the new executor."""
+        """Change download worker count. Search pool is unaffected.
+        The old executor finishes its current jobs in the background;
+        new download jobs go to the new executor."""
         n = max(1, int(n))
         if n == self._max_parallel:
             return
         old = self._executor
         self._max_parallel = n
         self._executor = ThreadPoolExecutor(
-            max_workers=n, thread_name_prefix="ytdlp-job",
+            max_workers=n, thread_name_prefix="ytdlp-dl",
         )
         # Don't wait on old jobs here — they keep running on the old pool.
         old.shutdown(wait=False)
+
+    def _pool_for(self, kind: str) -> ThreadPoolExecutor:
+        if kind in _SEARCH_KINDS:
+            return self._search_executor
+        return self._executor
 
     # --------- enqueue + cancel --------- #
 
@@ -111,7 +139,7 @@ class JobQueue:
             self._jobs[job.id] = job
         self._notify(job)
         # submit() may run immediately on a free worker thread.
-        fut = self._executor.submit(self._run_job, job)
+        fut = self._pool_for(kind).submit(self._run_job, job)
         with self._lock:
             self._futures[job.id] = fut
         return job
@@ -136,6 +164,7 @@ class JobQueue:
     def shutdown(self, wait: bool = False) -> None:
         self.cancel_all()
         self._executor.shutdown(wait=wait)
+        self._search_executor.shutdown(wait=wait)
 
     # --------- inspection --------- #
 
@@ -261,7 +290,11 @@ class JobQueue:
             from . import search as se
 
             url = params["url"]
-            if params.get("prefer_audio"):
+            # User-picked search results already chose a URL — rematching
+            # only delays the download. Spotify/auto matches still rematch
+            # when Prefer audio is on.
+            skip_rematch = bool(params.get("skip_prefer_audio_rematch"))
+            if params.get("prefer_audio") and not skip_rematch:
                 source_url = str(params.get("source_url") or url)
                 prefer_explicit = bool(params.get("allow_explicit", True))
                 skip_rematch = (
@@ -310,6 +343,18 @@ class JobQueue:
                         prefer_explicit=prefer_explicit,
                     )
 
+            title_hint = str(params.get("source_title") or "").strip() or None
+            uploader_hint = str(params.get("source_uploader") or "").strip() or None
+            duration_hint = params.get("source_duration_s")
+            if duration_hint is not None:
+                try:
+                    duration_hint = int(duration_hint)
+                except (TypeError, ValueError):
+                    duration_hint = None
+            thumb_hint = params.get("source_thumbnail_url")
+            if not isinstance(thumb_hint, str) or not thumb_hint.strip():
+                thumb_hint = None
+
             result = dl.download_music(
                 [url], params["output_dir"],
                 cookies_path=cookies,
@@ -318,6 +363,12 @@ class JobQueue:
                 on_pct=on_progress,
                 cancel_event=job.cancel_event,
                 prefer_explicit=bool(params.get("allow_explicit", True)),
+                title_hint=title_hint,
+                uploader_hint=uploader_hint,
+                duration_hint=duration_hint,
+                thumbnail_hint=thumb_hint,
+                # Start bytes ASAP; iTunes naming/tags happen in postprocess.
+                defer_itunes=bool(title_hint),
             )
             if not result.success:
                 job.state = FAILED

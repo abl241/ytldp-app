@@ -356,6 +356,8 @@ Toggle **Download lyrics** to fetch synced `.lrc` lyrics and embed them in the M
 
 When enabled, easy-dlp searches YouTube for an **official-audio upload** or **Topic channel** version instead of downloading a music video. It scores candidates by token overlap, artist match, duration proximity, and Topic-channel heuristics. If no audio upload matches, it **falls back to a music video** rather than skipping the track.
 
+For tracks you pick yourself from Music search results, Prefer audio does **not** rematch away from your choice — the download starts on the URL you selected. Rematch still applies for auto-matched playlist imports (e.g. Spotify).
+
 ### Audio-only search filter
 
 An optional filter hides music videos and live performances from Music search results, surfacing uploads that are already audio-first.
@@ -467,7 +469,7 @@ Point at a folder of audio files and a folder of images. easy-dlp pairs `Song.mp
 
 ## Job queue & live progress
 
-Downloads never freeze the UI. Every operation runs on a background thread and reports back in real time.
+Downloads never freeze the UI. Search, matching, and downloads run on **separate background worker pools**, so you can keep searching and queueing tracks while other downloads finish.
 
 <p align="center">
   <img src="docs/screenshots/06-job-panels.png" alt="Active and Recent job panels" width="900" />
@@ -478,7 +480,17 @@ Downloads never freeze the UI. Every operation runs on a background thread and r
 
 ### Active downloads panel
 
-Always visible at the bottom of the window. Shows every in-flight job with a **progress bar**, **cancel button**, and live status text. Supports configurable **parallel downloads** (default: 2 concurrent jobs).
+Always visible at the bottom of the window. Shows every in-flight job with a **progress bar**, **cancel button**, and live status text. Supports configurable **parallel downloads** (default: 2 concurrent jobs). Search and playlist matching use their own workers, so they don't steal download slots.
+
+### Fast music search → download
+
+On the Music tab, picking a search result starts the download immediately:
+
+- Uses the URL you chose (no Prefer-audio rematch for user picks)
+- Skips a second yt-dlp metadata peek when search already provided title/artist
+- Applies iTunes tags, cover art, and lyrics **after** the file lands
+
+Result rows also render in small batches so the window stays clickable while a large result list fills in. Duplicate checks (folder / Apple Music) run off the UI thread.
 
 ### Recent jobs panel
 
@@ -651,7 +663,7 @@ Export cookies from your browser (Netscape format) and set the path in **Setting
 | Music data | iTunes Search API | Album art, track metadata, duration matching |
 | Playlist import | spotifyscraper | Public Spotify playlist/album metadata (no API key) |
 | Lyrics | LRCLIB | Synced lyric fetch |
-| Concurrency | `threading` + `queue` | Non-blocking UI with a worker job queue |
+| Concurrency | Dual `ThreadPoolExecutor` pools + `queue` | Separate search/match workers vs download workers; non-blocking UI |
 | Rate limiting | Exponential backoff | Automatic wait/retry when YouTube throttles requests |
 | Settings | JSON on disk | Persistent, OS-appropriate config directory |
 | Packaging | Double-click launchers + `run.sh` | Finder/Explorer friendly; no PyInstaller required |
@@ -662,8 +674,10 @@ Export cookies from your browser (Netscape format) and set the path in **Setting
 
 | Area | What it demonstrates |
 |:---|:---|
-| Job queue with cancellation | Downloads, searches, and metadata enrichment as discrete job kinds with shared progress/cancel plumbing |
-| UI thread safety | Worker threads post updates through a `queue.Queue`; the main thread polls and renders |
+| Job queue with cancellation | Downloads, searches, and metadata enrichment as discrete job kinds; search/resolve/match never block download workers |
+| Fast music download path | User-picked search results skip rematch + pre-download peek; iTunes tagging runs after the file lands |
+| Responsive results list | Search rows render in small chunks; scroll sync avoids layout recursion freezes |
+| UI thread safety | Worker threads post updates through a `queue.Queue`; the main thread polls and renders; duplicate checks and URL resolve stay off the UI thread |
 | Fuzzy audio matching | Music mode scores YouTube candidates by token overlap, artist match, duration proximity, and Topic-channel heuristics — with music-video fallback |
 | Platform registry | `sources/` module resolves YouTube and Spotify URLs into a unified `MusicTrack` model; new platforms plug in behind the Paste Link dropdown |
 | Spotify → YouTube pipeline | Two-phase jobs: `source_resolve` (metadata) then `source_match_all` (YouTube search per track) before the existing music download path |
@@ -698,8 +712,8 @@ easy-dlp/
 └── ytdlp_app/
     ├── __main__.py         # `python -m ytdlp_app` entry
     ├── gui.py              # customtkinter UI, tabs, scroll, job wiring
-    ├── jobs.py             # Background job queue (search / download / music)
-    ├── downloader.py       # yt-dlp wrappers for audio, video, thumbs, music
+    ├── jobs.py             # Dual job pools (search/match vs download) + cancel/progress
+    ├── downloader.py       # yt-dlp wrappers; fast-start music path (hints + deferred iTunes)
     ├── search.py           # YouTube search, URL resolve, audio candidate scoring
     ├── match_config.py     # Match quality presets (fast / balanced / accurate)
     ├── rate_limit.py       # YouTube rate-limit detection and backoff

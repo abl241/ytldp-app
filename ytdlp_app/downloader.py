@@ -376,11 +376,20 @@ def download_music(
     on_pct: PctFn | None = None,
     cancel_event: threading.Event | None = None,
     prefer_explicit: bool = True,
+    title_hint: str | None = None,
+    uploader_hint: str | None = None,
+    duration_hint: int | None = None,
+    thumbnail_hint: str | None = None,
+    defer_itunes: bool = False,
 ) -> MusicDownloadResult:
     """Download audio as MP3 named by parsed track title.
 
     Cover art and full metadata are applied in the post-download step via
     iTunes (YouTube thumbnail as fallback).
+
+    When `title_hint` is set, skip the pre-download yt-dlp peek. When
+    `defer_itunes` is True, skip the pre-download iTunes lookup too so
+    bytes start flowing immediately (postprocess still tags the file).
     """
     output_paths: list[str] = []
     track_infos: list[MusicTrackInfo] = []
@@ -392,18 +401,28 @@ def download_music(
         if cancel_event is not None and cancel_event.is_set():
             return MusicDownloadResult(success=False, message="cancelled")
 
-        raw_info = _peek_video_info(url, cookies_path=cookies_path,
-                                    cancel_event=cancel_event)
-        raw_title = str(raw_info.get("title") or raw_info.get("fulltitle") or "track")
-        uploader = str(raw_info.get("uploader") or raw_info.get("channel") or "")
+        raw_info: dict[str, Any] = {}
+        if title_hint:
+            raw_title = title_hint
+            uploader = uploader_hint or ""
+            duration_s = duration_hint
+            progress("[music] using search metadata — starting download…")
+        else:
+            raw_info = _peek_video_info(url, cookies_path=cookies_path,
+                                        cancel_event=cancel_event)
+            raw_title = str(raw_info.get("title") or raw_info.get("fulltitle") or "track")
+            uploader = str(raw_info.get("uploader") or raw_info.get("channel") or "")
+            duration = raw_info.get("duration")
+            duration_s = int(duration) if isinstance(duration, (int, float)) else None
+
         parsed = parse_youtube_track(raw_title, uploader)
-        duration = raw_info.get("duration")
-        duration_s = int(duration) if isinstance(duration, (int, float)) else None
-        itunes = search_track(
-            parsed.artist, parsed.title,
-            duration_s=duration_s,
-            prefer_explicit=prefer_explicit,
-        )
+        itunes = None
+        if not defer_itunes:
+            itunes = search_track(
+                parsed.artist, parsed.title,
+                duration_s=duration_s,
+                prefer_explicit=prefer_explicit,
+            )
         filename = sanitize_filename(
             itunes.title if itunes else (parsed.title or raw_title),
         )
@@ -439,11 +458,33 @@ def download_music(
         if per_infos:
             for ti in per_infos:
                 ti.itunes_match = itunes
+                if not ti.title and raw_title:
+                    ti.title = raw_title
+                if not ti.uploader and uploader:
+                    ti.uploader = uploader
+                if ti.duration_s is None and duration_s is not None:
+                    ti.duration_s = duration_s
+                if not ti.thumbnail_url and thumbnail_hint:
+                    ti.thumbnail_url = thumbnail_hint
+                if not ti.parsed_artist and parsed.artist:
+                    ti.parsed_artist = parsed.artist
+                if not ti.parsed_title and parsed.title:
+                    ti.parsed_title = parsed.title
             track_infos.extend(per_infos)
         elif raw_info:
             ti = _music_info_from_raw(raw_info)
             ti.itunes_match = itunes
             track_infos.append(ti)
+        else:
+            track_infos.append(MusicTrackInfo(
+                title=raw_title,
+                uploader=uploader,
+                parsed_artist=parsed.artist,
+                parsed_title=parsed.title,
+                duration_s=duration_s,
+                thumbnail_url=thumbnail_hint,
+                itunes_match=itunes,
+            ))
 
     return MusicDownloadResult(
         success=any_success and bool(output_paths),
