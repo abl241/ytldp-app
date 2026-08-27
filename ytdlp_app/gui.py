@@ -3,14 +3,11 @@
 Layout:
 
     +-----------------------------------------------------------+
-    |  Tabs: [Music | Download | Embed Thumbnail | Settings] |
+    |  Tabs: [Music | Video | Settings]                       |
+    |  Music: staged workspace (compose → results → rematch)  |
     |  ... tab content (results expand to fill) ...             |
     +-----------------------------------------------------------+
-    |  Active downloads (collapsible; auto-shows on job start)|
-    +-----------------------------------------------------------+
-    |  Recent jobs (collapsed by default)                       |
-    +-----------------------------------------------------------+
-    |  Status bar + log (log collapsed by default)            |
+    |  Activity dock: Active | Recent | Log (one slim strip)  |
     +-----------------------------------------------------------+
 """
 
@@ -58,8 +55,7 @@ _LOG_HEIGHT_LABELS = {
 
 _MAIN_TAB_NAMES = {
     "music": "Music",
-    "download": "Download",
-    "embed": "Embed Thumbnail",
+    "download": "Video",
     "settings": "Settings",
 }
 _MAIN_TAB_KEYS = {v: k for k, v in _MAIN_TAB_NAMES.items()}
@@ -229,10 +225,10 @@ class App(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title(f"easy-dlp {__version__}")
-        w = int(self.settings.get("window_width") or 1100)
-        h = int(self.settings.get("window_height") or 960)
+        w = int(self.settings.get("window_width") or 1280)
+        h = int(self.settings.get("window_height") or 1000)
         self.geometry(f"{w}x{h}")
-        self.minsize(900, 720)
+        self.minsize(1000, 800)
         # After Tk is up — AppKit before CTk() crashes Tk 9 on macOS.
         apply_window_icon(self)
 
@@ -295,7 +291,10 @@ class App(ctk.CTk):
         self._search_scroll_footer: ctk.CTkButton | None = None
         self._results_scroll_sync_pending: dict[int, str | None] = {}
         self._music_alternate_open_index: int | None = None
+        self._music_alternate_mode: str = "track"  # "track" | "search"
         self._music_alternate_panels: dict[int, "_MusicAlternatePanel"] = {}
+        self._music_rematch_panel: "_MusicAlternatePanel | None" = None
+        self._music_input_collapsed: bool = False
         self._music_pending_stream_albums: list[SearchResult] = []
         # Chunked result rendering — building all CTk rows in one go freezes
         # the UI for seconds on macOS.
@@ -319,15 +318,10 @@ class App(ctk.CTk):
             self._log_height = "normal"
 
         # ----- build UI -----
-        # Pack order matters: bottom widgets are packed first (innermost first
-        # when stacking from the same side). We want, top -> bottom:
-        #     [ Tabs (expand) ]
-        #     [ Active panel  ]
-        #     [ Recent panel  ]
-        #     [ Log pane      ]
-        self._build_log_pane()       # side="bottom" — pinned to bottom
-        self._build_recent_panel()   # side="bottom" — above log
-        self._build_active_panel()   # side="bottom" — above recent
+        # Pack order: bottom dock first, then expanding tabs above it.
+        #     [ Tabs (expand) — staged music workspace ]
+        #     [ Activity dock: Active | Recent | Log   ]
+        self._build_activity_dock()  # side="bottom" — single slim strip
         self._build_tabs()           # side="top", expand=True — fills the top
         self._setup_scroll_forwarding()
         self._poll_msg_q()
@@ -344,16 +338,16 @@ class App(ctk.CTk):
         self.tabs.pack(side="top", fill="both", expand=True, padx=10, pady=10)
 
         self.music_tab = self.tabs.add("Music")
-        self.download_tab = self.tabs.add("Download")
-        self.embed_tab = self.tabs.add("Embed Thumbnail")
+        self.download_tab = self.tabs.add("Video")
         self.settings_tab = self.tabs.add("Settings")
 
         self._build_music_tab(self.music_tab)
         self._build_download_tab(self.download_tab)
-        self._build_embed_tab(self.embed_tab)
         self._build_settings_tab(self.settings_tab)
 
         tab_key = str(self.settings.get("main_tab") or "music")
+        if tab_key not in _MAIN_TAB_NAMES:
+            tab_key = "settings" if tab_key == "embed" else "music"
         self.tabs.set(_MAIN_TAB_NAMES.get(tab_key, "Music"))
 
     # ------------------------- Download tab ---------------------------------
@@ -840,8 +834,35 @@ class App(ctk.CTk):
 
         input_wrap = ctk.CTkFrame(parent, fg_color="transparent")
         input_wrap.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 4))
+        self._music_input_wrap = input_wrap
 
-        self.music_source_tabs = ctk.CTkTabview(input_wrap, height=105)
+        # Compact context strip shown after resolve/search (Stage B).
+        self._music_context_strip = ctk.CTkFrame(input_wrap, fg_color="transparent")
+        self._music_context_label = ctk.CTkLabel(
+            self._music_context_strip,
+            text="",
+            anchor="w",
+            font=ctk.CTkFont(weight="bold"),
+        )
+        self._music_context_label.pack(side="left", fill="x", expand=True, padx=4)
+        self._music_context_new_btn = ctk.CTkButton(
+            self._music_context_strip, text="New link", width=90, height=28,
+            fg_color="transparent", border_width=1,
+            command=self._music_new_link,
+        )
+        self._music_context_new_btn.pack(side="right", padx=2)
+        self._music_context_match_btn = ctk.CTkButton(
+            self._music_context_strip, text="Match on YouTube", width=140, height=28,
+            command=self._music_match_all,
+        )
+        # packed conditionally when pending matches exist
+        self._music_context_search_btn = ctk.CTkButton(
+            self._music_context_strip, text="New search", width=100, height=28,
+            fg_color="transparent", border_width=1,
+            command=self._music_new_search,
+        )
+
+        self.music_source_tabs = ctk.CTkTabview(input_wrap)
         self.music_source_tabs.pack(fill="x")
         self._build_music_search_subtab(self.music_source_tabs.add("Search YouTube"))
         self._build_music_paste_subtab(self.music_source_tabs.add("Paste Link"))
@@ -855,9 +876,11 @@ class App(ctk.CTk):
         res_outer.grid_columnconfigure(0, weight=1)
         res_outer.grid_rowconfigure(1, weight=1)
         res_outer.grid_rowconfigure(2, weight=0)
+        self._music_res_outer = res_outer
 
         header = ctk.CTkFrame(res_outer, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=6, pady=(6, 2))
+        self._music_results_header = header
         self.music_results_header_label = ctk.CTkLabel(
             header, text="Results (0) — search or paste a URL above",
             anchor="w", font=ctk.CTkFont(weight="bold"),
@@ -872,7 +895,7 @@ class App(ctk.CTk):
             command=self._show_music_more_menu,
         )
         self._music_more_btn.pack(side="right", padx=2)
-        ctk.CTkButton(header, text="Download all", width=130,
+        ctk.CTkButton(header, text="Download all", width=120,
                       command=lambda: self._music_download_all(override=False)).pack(
             side="right", padx=2,
         )
@@ -892,6 +915,7 @@ class App(ctk.CTk):
                                        padx=6, pady=(0, 6))
         self._bind_results_pagination_watch(self.music_results_frame)
         self._music_render_results()
+        self._music_update_input_stage()
 
     def _build_music_search_subtab(self, parent) -> None:
         row = ctk.CTkFrame(parent, fg_color="transparent")
@@ -971,9 +995,9 @@ class App(ctk.CTk):
 
         btn_row = ctk.CTkFrame(parent, fg_color="transparent")
         btn_row.pack(fill="x", padx=10, pady=(2, 8))
-        ctk.CTkButton(btn_row, text="Resolve & Pick", width=160,
+        ctk.CTkButton(btn_row, text="Resolve", width=100,
                       command=self._music_do_resolve).pack(side="left", padx=2)
-        ctk.CTkButton(btn_row, text="Download all immediately", width=210,
+        ctk.CTkButton(btn_row, text="Download all", width=120,
                       command=lambda: self._music_paste_download_all(override=False)).pack(
             side="left", padx=2,
         )
@@ -1156,13 +1180,9 @@ class App(ctk.CTk):
             pass
         self._schedule_results_scroll_height_sync()
 
-    def _ensure_active_expanded(self) -> None:
-        if self._active_collapsed:
-            self._toggle_active()
+    # ------------------------- Embed thumbnail (legacy) ---------------------
 
-    # ------------------------- Embed tab ------------------------------------
-
-    def _build_embed_tab(self, parent) -> None:
+    def _build_embed_thumbnail_ui(self, parent) -> None:
         ctk.CTkLabel(
             parent,
             text=("Embed a new thumbnail into existing audio files.\n"
@@ -1430,6 +1450,16 @@ class App(ctk.CTk):
                 side="left", padx=6,
             )
 
+        # Legacy tools (formerly top-level tabs)
+        s_legacy = section("Legacy")
+        ctk.CTkLabel(
+            s_legacy,
+            text="Embed Thumbnail — older workflow for attaching cover art to "
+                 "existing audio files. Prefer Music mode for new downloads.",
+            text_color=("gray40", "gray70"), wraplength=820, justify="left",
+        ).pack(fill="x", padx=14, pady=(8, 2), anchor="w")
+        self._build_embed_thumbnail_ui(s_legacy)
+
         # About
         s_about = section("About")
         ff = find_ffmpeg()
@@ -1459,10 +1489,10 @@ class App(ctk.CTk):
 
     # ------------------------- bottom panels --------------------------------
 
-    # ---- Heights used by the three collapsible bottom panels.
+    # ---- Heights used by the activity dock.
     _ACTIVE_EXPANDED_H = 150
     _RECENT_EXPANDED_H = 110
-    _COLLAPSED_H = 36
+    _COLLAPSED_H = 32
 
     _PANEL_HEIGHTS = {"normal": None, "large": None, "xlarge": None}
 
@@ -1483,147 +1513,272 @@ class App(ctk.CTk):
     def _log_expanded_height(self) -> int:
         return _LOG_HEIGHTS.get(self._log_height, _LOG_HEIGHTS["normal"])
 
-    def _build_active_panel(self) -> None:
-        # Fixed-height outer so an empty CTkScrollableFrame doesn't claim
-        # 250+px of vertical space and squash the tabs above it.
-        outer = ctk.CTkFrame(self, height=self._active_expanded_height())
-        outer.pack(side="bottom", fill="x", padx=10, pady=(0, 4))
+    def _activity_expanded_height(self) -> int:
+        seg = getattr(self, "_activity_segment", "active")
+        if seg == "recent":
+            return self._recent_expanded_height()
+        if seg == "log":
+            return self._log_expanded_height()
+        return self._active_expanded_height()
+
+    def _build_activity_dock(self) -> None:
+        """Single bottom dock with Active | Recent | Log segments."""
+        outer = ctk.CTkFrame(self, height=self._COLLAPSED_H)
+        outer.pack(side="bottom", fill="x", padx=10, pady=(0, 8))
         outer.pack_propagate(False)
+        self._activity_dock = outer
+        # Aliases kept for any remaining references / popout restore.
         self._active_outer = outer
+        self._recent_outer = outer
+        self._log_outer = outer
 
         header = ctk.CTkFrame(outer, fg_color="transparent")
-        header.pack(fill="x", padx=6, pady=(4, 2))
-        self.active_header = ctk.CTkLabel(
-            header, text="Active downloads (0)", anchor="w",
-            font=ctk.CTkFont(weight="bold"),
+        header.pack(fill="x", padx=6, pady=(2, 0))
+        self._activity_header = header
+
+        seg_row = ctk.CTkFrame(header, fg_color="transparent")
+        seg_row.pack(side="left")
+        self._activity_seg_btns: dict[str, ctk.CTkButton] = {}
+        for key, label in (
+            ("active", "Active"),
+            ("recent", "Recent"),
+            ("log", "Log"),
+        ):
+            btn = ctk.CTkButton(
+                seg_row, text=label, width=78, height=24,
+                fg_color="transparent", border_width=1,
+                command=lambda k=key: self._on_activity_segment_click(k),
+            )
+            btn.pack(side="left", padx=1)
+            self._activity_seg_btns[key] = btn
+
+        # Compatibility labels updated by existing header helpers.
+        self.active_header = self._activity_seg_btns["active"]
+        self.recent_header = self._activity_seg_btns["recent"]
+
+        self.status_var = ctk.StringVar(value="Ready")
+        ctk.CTkLabel(header, textvariable=self.status_var, anchor="w").pack(
+            side="left", fill="x", expand=True, padx=(8, 4),
         )
-        self.active_header.pack(side="left", padx=4)
+
+        self._activity_actions = ctk.CTkFrame(header, fg_color="transparent")
+        self._activity_actions.pack(side="right")
+
+        self._activity_toggle_btn = ctk.CTkButton(
+            header, text="Show ▸", width=72, height=24,
+            command=self._toggle_activity_dock,
+        )
+        self._activity_toggle_btn.pack(side="right", padx=(2, 0))
+
+        # Shared action widgets (shown/hidden per segment).
         self._active_size_btn = ctk.CTkButton(
-            header, text=str(self.settings.get("panel_active_height") or "normal").capitalize(),
-            width=90, fg_color="transparent", border_width=1,
+            self._activity_actions,
+            text=str(self.settings.get("panel_active_height") or "normal").capitalize(),
+            width=80, height=24, fg_color="transparent", border_width=1,
             command=self._cycle_active_height,
         )
-        self._active_size_btn.pack(side="right", padx=2)
         self._active_popout_btn = ctk.CTkButton(
-            header, text="Pop out", width=80,
+            self._activity_actions, text="Pop out", width=72, height=24,
             fg_color="transparent", border_width=1,
             command=self._toggle_active_popout,
         )
-        self._active_popout_btn.pack(side="right", padx=2)
-        self._active_toggle_btn = ctk.CTkButton(
-            header, text="Hide ▾", width=80,
-            command=self._toggle_active,
+        self._active_cancel_btn = ctk.CTkButton(
+            self._activity_actions, text="Cancel all", width=100, height=24,
+            command=self.jobs.cancel_all,
         )
-        self._active_toggle_btn.pack(side="right", padx=2)
-        ctk.CTkButton(header, text="Cancel all", width=110,
-                      command=self.jobs.cancel_all).pack(side="right", padx=2)
-
-        self.active_frame = ctk.CTkScrollableFrame(outer)
-        self.active_frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-
-        self._active_collapsed = False
-        if self.settings.get("panel_active_collapsed"):
-            self._toggle_active()
-
-    def _build_recent_panel(self) -> None:
-        outer = ctk.CTkFrame(self, height=self._recent_expanded_height())
-        outer.pack(side="bottom", fill="x", padx=10, pady=(0, 4))
-        outer.pack_propagate(False)
-        self._recent_outer = outer
-
-        header = ctk.CTkFrame(outer, fg_color="transparent")
-        header.pack(fill="x", padx=6, pady=(4, 2))
-        self._recent_collapsed = False
-
-        self.recent_header = ctk.CTkLabel(
-            header, text="Recent (0)", anchor="w",
-            font=ctk.CTkFont(weight="bold"),
-        )
-        self.recent_header.pack(side="left", padx=4)
         self._recent_size_btn = ctk.CTkButton(
-            header, text=str(self.settings.get("panel_recent_height") or "normal").capitalize(),
-            width=90, fg_color="transparent", border_width=1,
+            self._activity_actions,
+            text=str(self.settings.get("panel_recent_height") or "normal").capitalize(),
+            width=80, height=24, fg_color="transparent", border_width=1,
             command=self._cycle_recent_height,
         )
-        self._recent_size_btn.pack(side="right", padx=2)
         self._recent_popout_btn = ctk.CTkButton(
-            header, text="Pop out", width=80,
+            self._activity_actions, text="Pop out", width=72, height=24,
             fg_color="transparent", border_width=1,
             command=self._toggle_recent_popout,
         )
-        self._recent_popout_btn.pack(side="right", padx=2)
-        self._recent_toggle_btn = ctk.CTkButton(
-            header, text="Hide ▾", width=80,
-            command=self._toggle_recent,
+        self._recent_clear_btn = ctk.CTkButton(
+            self._activity_actions, text="Clear", width=64, height=24,
+            command=self._clear_recent,
         )
-        self._recent_toggle_btn.pack(side="right", padx=2)
-        ctk.CTkButton(header, text="Clear", width=70,
-                      command=self._clear_recent).pack(side="right", padx=2)
         self._recent_retry_all_btn = ctk.CTkButton(
-            header, text="Retry all failed", width=120,
+            self._activity_actions, text="Retry all failed", width=120, height=24,
             fg_color="#8b2e2e", hover_color="#a33",
             command=self._retry_all_failed_recent,
         )
-        self._recent_retry_all_btn.pack(side="right", padx=2)
-        self._recent_retry_all_btn.pack_forget()
-
-        self.recent_frame = ctk.CTkScrollableFrame(outer)
-        self.recent_frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-
-        if self.settings.get("panel_recent_collapsed"):
-            self._toggle_recent()
-
-    def _build_log_pane(self) -> None:
-        outer = ctk.CTkFrame(self, height=self._log_expanded_height())
-        outer.pack(side="bottom", fill="x", padx=10, pady=(0, 8))
-        outer.pack_propagate(False)
-        self._log_outer = outer
-
-        bar = ctk.CTkFrame(outer, fg_color="transparent")
-        bar.pack(fill="x", padx=6, pady=(2, 0))
-        self.status_var = ctk.StringVar(value="Ready")
-        ctk.CTkLabel(bar, textvariable=self.status_var, anchor="w").pack(
-            side="left", fill="x", expand=True, padx=4,
-        )
         self._log_latest_btn = ctk.CTkButton(
-            bar, text="↓ Latest", width=80,
+            self._activity_actions, text="↓ Latest", width=72, height=24,
             fg_color="transparent", border_width=1,
             command=self._log_jump_to_latest,
         )
         self._log_size_btn = ctk.CTkButton(
-            bar, text=_LOG_HEIGHT_LABELS.get(self._log_height, "Size"),
-            width=110, fg_color="transparent", border_width=1,
+            self._activity_actions,
+            text=_LOG_HEIGHT_LABELS.get(self._log_height, "Size"),
+            width=100, height=24, fg_color="transparent", border_width=1,
             command=self._cycle_log_height,
         )
-        self._log_size_btn.pack(side="right", padx=2)
         self._log_popout_btn = ctk.CTkButton(
-            bar, text="Pop out", width=80,
+            self._activity_actions, text="Pop out", width=72, height=24,
             fg_color="transparent", border_width=1,
             command=self._toggle_log_popout,
         )
-        self._log_popout_btn.pack(side="right", padx=2)
-        self._log_toggle_btn = ctk.CTkButton(
-            bar, text="Hide log ▾", width=100,
-            command=self._toggle_log,
+        self._log_clear_btn = ctk.CTkButton(
+            self._activity_actions, text="Clear", width=64, height=24,
+            command=self._clear_log,
         )
-        self._log_toggle_btn.pack(side="right", padx=2)
-        ctk.CTkButton(bar, text="Clear", width=70,
-                      command=self._clear_log).pack(side="right", padx=2)
 
-        log_font = ctk.CTkFont(
-            size=13 if self._log_height != "normal" else 12,
-        )
+        # Bodies live in one container; only the selected segment is packed.
+        self._activity_body = ctk.CTkFrame(outer, fg_color="transparent")
+        self.active_frame = ctk.CTkScrollableFrame(self._activity_body)
+        self.recent_frame = ctk.CTkScrollableFrame(self._activity_body)
+        log_font = ctk.CTkFont(size=13 if self._log_height != "normal" else 12)
         self.log_box = ctk.CTkTextbox(
-            outer, height=80, wrap="none", font=log_font,
+            self._activity_body, height=80, wrap="none", font=log_font,
         )
-        self.log_box.pack(fill="both", expand=True, padx=6, pady=(2, 6))
         self.log_box.configure(state="disabled")
         self._bind_log_scroll_tracking(self.log_box)
 
-        self._log_collapsed = False
-        if self.settings.get("panel_log_collapsed"):
-            self._toggle_log()
+        # Legacy per-panel collapse flags (settings + ensure_active_expanded).
+        self._active_collapsed = True
+        self._recent_collapsed = True
+        self._log_collapsed = True
 
+        seg = str(self.settings.get("activity_dock_segment") or "active")
+        if seg not in ("active", "recent", "log"):
+            seg = "active"
+        # Prefer an expanded segment from prior settings if any.
+        if not bool(self.settings.get("panel_active_collapsed", True)):
+            seg = "active"
+            self._activity_collapsed = False
+        elif not bool(self.settings.get("panel_recent_collapsed", True)):
+            seg = "recent"
+            self._activity_collapsed = False
+        elif not bool(self.settings.get("panel_log_collapsed", True)):
+            seg = "log"
+            self._activity_collapsed = False
+        else:
+            self._activity_collapsed = True
+        self._activity_segment = seg
+
+        self._apply_activity_dock_layout()
+        self._update_activity_segment_styles()
+        self.active_header.configure(text="Active (0)")
+        self.recent_header.configure(text="Recent (0)")
+
+    def _on_activity_segment_click(self, segment: str) -> None:
+        if self._activity_segment == segment and not self._activity_collapsed:
+            # Clicking the open segment collapses the dock.
+            self._toggle_activity_dock()
+            return
+        self._activity_segment = segment
+        self.settings.set("activity_dock_segment", segment)
+        if self._activity_collapsed:
+            self._activity_collapsed = False
+        self._apply_activity_dock_layout()
+        self._persist_activity_collapse_flags()
+
+    def _toggle_activity_dock(self) -> None:
+        self._activity_collapsed = not self._activity_collapsed
+        self._apply_activity_dock_layout()
+        self._persist_activity_collapse_flags()
+        self._schedule_results_scroll_height_sync()
+
+    def _persist_activity_collapse_flags(self) -> None:
+        collapsed = self._activity_collapsed
+        seg = self._activity_segment
+        self._active_collapsed = collapsed or seg != "active"
+        self._recent_collapsed = collapsed or seg != "recent"
+        self._log_collapsed = collapsed or seg != "log"
+        self.settings.set("panel_active_collapsed", self._active_collapsed)
+        self.settings.set("panel_recent_collapsed", self._recent_collapsed)
+        self.settings.set("panel_log_collapsed", self._log_collapsed)
+        self.settings.set("activity_dock_segment", seg)
+
+    def _apply_activity_dock_layout(self) -> None:
+        for child in self._activity_body.winfo_children():
+            child.pack_forget()
+        self._activity_body.pack_forget()
+
+        for child in self._activity_actions.winfo_children():
+            child.pack_forget()
+
+        if self._activity_collapsed:
+            self._activity_dock.configure(height=self._COLLAPSED_H)
+            self._activity_toggle_btn.configure(text="Show ▸")
+            self._update_activity_segment_styles()
+            return
+
+        self._activity_dock.configure(height=self._activity_expanded_height())
+        self._activity_toggle_btn.configure(text="Hide ▾")
+        self._activity_body.pack(fill="both", expand=True, padx=6, pady=(0, 4))
+
+        seg = self._activity_segment
+        if seg == "active":
+            self.active_frame.pack(fill="both", expand=True)
+            self._active_cancel_btn.pack(side="right", padx=2)
+            self._active_popout_btn.pack(side="right", padx=2)
+            self._active_size_btn.pack(side="right", padx=2)
+        elif seg == "recent":
+            self.recent_frame.pack(fill="both", expand=True)
+            self._recent_clear_btn.pack(side="right", padx=2)
+            self._recent_popout_btn.pack(side="right", padx=2)
+            self._recent_size_btn.pack(side="right", padx=2)
+            self._update_recent_header()  # may show retry btn
+        else:
+            self.log_box.pack(fill="both", expand=True)
+            self._log_clear_btn.pack(side="right", padx=2)
+            self._log_popout_btn.pack(side="right", padx=2)
+            self._log_size_btn.pack(side="right", padx=2)
+            self.after_idle(self._update_log_latest_btn)
+
+        self._update_activity_segment_styles()
+
+    def _update_activity_segment_styles(self) -> None:
+        for key, btn in self._activity_seg_btns.items():
+            if key == self._activity_segment and not self._activity_collapsed:
+                btn.configure(fg_color=("gray75", "gray35"), border_width=0)
+            else:
+                btn.configure(fg_color="transparent", border_width=1)
+
+    def _ensure_active_expanded(self) -> None:
+        if (
+            self._activity_collapsed
+            or self._activity_segment != "active"
+        ):
+            self._activity_segment = "active"
+            self._activity_collapsed = False
+            self.settings.set("activity_dock_segment", "active")
+            self._apply_activity_dock_layout()
+            self._persist_activity_collapse_flags()
+            self._schedule_results_scroll_height_sync()
+
+    # Legacy toggle entry points (menus / old callers).
+    def _toggle_active(self) -> None:
+        if self._activity_segment != "active" or self._activity_collapsed:
+            self._activity_segment = "active"
+            self._activity_collapsed = False
+        else:
+            self._activity_collapsed = True
+        self._apply_activity_dock_layout()
+        self._persist_activity_collapse_flags()
+
+    def _toggle_recent(self) -> None:
+        if self._activity_segment != "recent" or self._activity_collapsed:
+            self._activity_segment = "recent"
+            self._activity_collapsed = False
+        else:
+            self._activity_collapsed = True
+        self._apply_activity_dock_layout()
+        self._persist_activity_collapse_flags()
+
+    def _toggle_log(self) -> None:
+        if self._activity_segment != "log" or self._activity_collapsed:
+            self._activity_segment = "log"
+            self._activity_collapsed = False
+        else:
+            self._activity_collapsed = True
+        self._apply_activity_dock_layout()
+        self._persist_activity_collapse_flags()
     # ====================== Actions ========================================
 
     def _checked_formats(self) -> list[str]:
@@ -2569,6 +2724,12 @@ class App(ctk.CTk):
         self._render_results()
 
     def _music_render_results(self) -> None:
+        if (
+            self._music_alternate_open_index is not None
+            and self._music_rematch_panel is not None
+        ):
+            self._music_update_input_stage()
+            return
         self._music_clear_loading_indicator()
         self._music_alternate_panels.clear()
         self._music_render_token += 1
@@ -2611,6 +2772,7 @@ class App(ctk.CTk):
             }
             pending_tracks = list(enumerate(self.music_tracks))
             self._music_render_tracks_chunk(token, pending_tracks, 0)
+            self._music_update_input_stage()
             return
 
         self._music_header_actions = {}
@@ -2626,6 +2788,7 @@ class App(ctk.CTk):
         self._schedule_scroll_bottom_check()
         pending = list(enumerate(self.music_results))
         self._music_render_search_chunk(token, pending, 0)
+        self._music_update_input_stage()
 
     def _music_render_tracks_chunk(
         self,
@@ -2641,7 +2804,6 @@ class App(ctk.CTk):
                 _MusicTrackRow(
                     self.music_results_frame, track, self,
                     track_index=i,
-                    alternate_open=(i == self._music_alternate_open_index),
                 ),
             )
         if end < len(pending):
@@ -2666,7 +2828,6 @@ class App(ctk.CTk):
                 _ResultRow(
                     self.music_results_frame, r, self, mode="music",
                     result_index=i,
-                    alternate_open=(i == self._music_alternate_open_index),
                 ),
             )
         if end < len(pending):
@@ -2732,19 +2893,176 @@ class App(ctk.CTk):
             )
             self._search_scroll_footer.pack(fill="x", padx=8, pady=4)
 
+    def _music_has_workspace_content(self) -> bool:
+        return bool(self.music_tracks) or bool(self.music_results)
+
+    def _music_update_input_stage(self) -> None:
+        """Stage A = compose (source tabs); Stage B = review (context strip)."""
+        has_content = self._music_has_workspace_content()
+        rematch_open = self._music_alternate_open_index is not None
+        show_compose = not has_content and not rematch_open
+
+        self._music_context_strip.pack_forget()
+        self._music_context_match_btn.pack_forget()
+        self._music_context_search_btn.pack_forget()
+        self._music_context_new_btn.pack_forget()
+
+        if show_compose:
+            self._music_input_collapsed = False
+            self.music_source_tabs.pack(fill="x")
+            return
+
+        self._music_input_collapsed = True
+        self.music_source_tabs.pack_forget()
+
+        # Context strip summary.
+        if rematch_open:
+            label = "Rematch — pick an alternate YouTube match"
+            self._music_context_label.configure(text=label)
+            self._music_context_new_btn.configure(text="Back to list")
+            self._music_context_new_btn.configure(command=self._music_close_rematch)
+            self._music_context_new_btn.pack(side="right", padx=2)
+        elif self._music_showing_tracks and self.music_tracks:
+            platform = self._music_platform_id()
+            plat_label = platform_config(platform).label
+            pending_n = sum(
+                1 for t in self.music_tracks if t.match_status == MATCH_PENDING
+            )
+            failed = sum(
+                1 for t in self.music_tracks if t.match_status == MATCH_FAILED
+            )
+            bits = [f"{plat_label} · {len(self.music_tracks)} tracks"]
+            if pending_n:
+                bits.append(f"{pending_n} need match")
+            elif failed:
+                bits.append(f"{failed} failed")
+            else:
+                bits.append("ready")
+            self._music_context_label.configure(text=" · ".join(bits))
+            self._music_context_new_btn.configure(text="New link")
+            self._music_context_new_btn.configure(command=self._music_new_link)
+            self._music_context_new_btn.pack(side="right", padx=2)
+            if pending_n:
+                self._music_context_match_btn.pack(
+                    side="right", padx=2, before=self._music_context_new_btn,
+                )
+        else:
+            n = len(self.music_results)
+            q = self._music_search_query or self.music_search_var.get().strip()
+            if q:
+                self._music_context_label.configure(
+                    text=f"Search · {_truncate(q, 48)} · {n} results",
+                )
+            else:
+                self._music_context_label.configure(text=f"Results · {n}")
+            self._music_context_new_btn.configure(text="New link")
+            self._music_context_new_btn.configure(command=self._music_new_link)
+            self._music_context_search_btn.pack(side="right", padx=2)
+            self._music_context_new_btn.pack(side="right", padx=2)
+
+        self._music_context_strip.pack(fill="x", pady=(2, 0))
+
+    def _music_new_search(self) -> None:
+        """Return to compose stage focused on Search YouTube."""
+        if self._active_rows and not messagebox.askyesno(
+            "New search",
+            "Clear current results and start a new search?\n\n"
+            "Active downloads will keep running.",
+        ):
+            return
+        self._music_close_rematch(render=False)
+        self._music_clear_results(confirm=False)
+        self.music_source_tabs.set("Search YouTube")
+        self.settings.set("music_source_tab", "search")
+        self._music_update_input_stage()
+
     def _music_new_link(self) -> None:
         """Clear the current playlist/results and show the paste/search input."""
-        self._music_clear_results()
+        if self._active_rows and not messagebox.askyesno(
+            "New link",
+            "Clear current results and paste a new link?\n\n"
+            "Active downloads will keep running.",
+        ):
+            return
+        self._music_close_rematch(render=False)
+        self._music_clear_results(confirm=False)
         self.music_source_tabs.set("Paste Link")
         self.settings.set("music_source_tab", "paste")
-        self.music_paste_box.focus_set()
+        self._music_update_input_stage()
+        try:
+            self.music_paste_box.focus_set()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _music_close_rematch(self, *, render: bool = True) -> None:
+        self._music_alternate_open_index = None
+        panel = self._music_rematch_panel
+        self._music_rematch_panel = None
+        if panel is not None:
+            panel.destroy()
+        self._music_alternate_panels.clear()
+        if render:
+            # Restore scrollable list in results body.
+            if not self.music_results_frame.winfo_ismapped():
+                self.music_results_frame.pack(fill="both", expand=True)
+            self._music_render_results()
+            self._music_update_input_stage()
+            self._schedule_results_scroll_height_sync()
+
+    def _music_open_rematch(self, index: int, *, mode: str = "track") -> None:
+        """Open full-height rematch workspace replacing the track list."""
+        self._music_alternate_open_index = index
+        self._music_alternate_mode = mode
+        # Tear down list rows so rematch owns the viewport.
+        self._music_render_token += 1
+        for row in self._music_result_rows:
+            row.destroy()
+        self._music_result_rows.clear()
+        for row in self._music_track_rows:
+            row.destroy()
+        self._music_track_rows.clear()
+        if self._music_rematch_panel is not None:
+            self._music_rematch_panel.destroy()
+            self._music_rematch_panel = None
+        self.music_results_frame.pack_forget()
+        self.music_results_footer.grid_remove()
+
+        track = None
+        current = None
+        if mode == "track" and 0 <= index < len(self.music_tracks):
+            track = self.music_tracks[index]
+            self.music_results_header_label.configure(
+                text=f"Rematch — {track.display_title(60)}",
+            )
+        elif mode == "search" and 0 <= index < len(self.music_results):
+            current = self.music_results[index]
+            self.music_results_header_label.configure(
+                text=f"Change — {current.display_title(60)}",
+            )
+        else:
+            self._music_alternate_open_index = None
+            self.music_results_frame.pack(fill="both", expand=True)
+            self.music_results_footer.grid()
+            self._music_render_results()
+            return
+
+        self._music_rematch_panel = _MusicAlternatePanel(
+            self._music_results_body,
+            index,
+            self,
+            track=track,
+            current=current,
+            fill_parent=True,
+        )
+        self._music_update_input_stage()
+        self._schedule_results_scroll_height_sync()
 
     def _music_toggle_alternate(self, track_index: int) -> None:
         if self._music_alternate_open_index == track_index:
-            self._music_alternate_open_index = None
+            self._music_close_rematch()
         else:
-            self._music_alternate_open_index = track_index
-        self._music_render_results()
+            mode = "track" if self._music_showing_tracks else "search"
+            self._music_open_rematch(track_index, mode=mode)
 
     def _music_apply_manual_match(
         self, track_index: int, result: SearchResult,
@@ -2754,8 +3072,11 @@ class App(ctk.CTk):
         self.music_tracks[track_index] = self.music_tracks[track_index].with_match(
             result,
         )
-        self._music_alternate_open_index = None
+        self._music_close_rematch(render=False)
+        self.music_results_frame.pack(fill="both", expand=True)
+        self.music_results_footer.grid()
         self._music_render_results()
+        self._music_update_input_stage()
         self._set_status(f"Matched to: {result.display_title(60)}")
 
     def _music_apply_search_alternate(
@@ -2764,8 +3085,11 @@ class App(ctk.CTk):
         if result_index < 0 or result_index >= len(self.music_results):
             return
         self.music_results[result_index] = result
-        self._music_alternate_open_index = None
+        self._music_close_rematch(render=False)
+        self.music_results_frame.pack(fill="both", expand=True)
+        self.music_results_footer.grid()
         self._music_render_results()
+        self._music_update_input_stage()
         self._set_status(f"Changed to: {result.display_title(60)}")
 
     def _music_search_alternate(
@@ -2789,9 +3113,24 @@ class App(ctk.CTk):
             **self._music_search_job_params(),
         )
 
-    def _music_clear_results(self) -> None:
-        self._music_alternate_open_index = None
-        self._music_alternate_panels.clear()
+    def _music_clear_results(self, *, confirm: bool = True) -> None:
+        if (
+            confirm
+            and self._music_has_workspace_content()
+            and self._active_rows
+        ):
+            if not messagebox.askyesno(
+                "Clear results",
+                "Clear the current track list?\n\n"
+                "Active downloads will keep running.",
+            ):
+                return
+        self._music_close_rematch(render=False)
+        self.music_results_frame.pack(fill="both", expand=True)
+        try:
+            self.music_results_footer.grid()
+        except Exception:  # noqa: BLE001
+            pass
         self.music_results = []
         self.music_tracks = []
         self._music_track_count = 0
@@ -2805,6 +3144,7 @@ class App(ctk.CTk):
         self._music_search_more_exhausted = False
         self._music_clear_loading_indicator()
         self._music_render_results()
+        self._music_update_input_stage()
 
     # ====================== Infinite scroll =================================
 
@@ -2871,7 +3211,7 @@ class App(ctk.CTk):
         """Detect when the user has scrolled near the bottom of results
         and kick off a `search_more` job to append the next page."""
         try:
-            if self.tabs.get() == "Download":
+            if self.tabs.get() == "Video":
                 if (
                     self._search_query
                     and not self._search_loading_more
@@ -3151,11 +3491,14 @@ class App(ctk.CTk):
     def _music_refresh_track_row(self, index: int, track: MusicTrack) -> None:
         if index < 0 or index >= len(self._music_track_rows):
             return
-        alt_open = index == self._music_alternate_open_index
+        if self._music_alternate_open_index is not None:
+            # Rematch workspace owns the body; skip row rebuild.
+            self._music_update_match_header()
+            return
         self._music_track_rows[index].destroy()
         self._music_track_rows[index] = _MusicTrackRow(
             self.music_results_frame, track, self,
-            track_index=index, alternate_open=alt_open,
+            track_index=index,
         )
 
     def _music_update_match_header(self) -> None:
@@ -3172,6 +3515,7 @@ class App(ctk.CTk):
         else:
             header += f" — {matched} ready"
         self.music_results_header_label.configure(text=header)
+        self._music_update_input_stage()
 
     def _add_recent_job(self, job: Job) -> None:
         key = _recent_dedupe_key(job)
@@ -3239,6 +3583,8 @@ class App(ctk.CTk):
                 panel = self._music_alternate_panels.get(
                     job.params.get("track_index"),
                 )
+                if panel is None:
+                    panel = self._music_rematch_panel
                 if panel is not None:
                     panel.set_searching(job.progress_msg or "Searching…")
             elif job.kind == "search":
@@ -3279,6 +3625,8 @@ class App(ctk.CTk):
                     panel = self._music_alternate_panels.get(
                         job.params.get("track_index"),
                     )
+                    if panel is None:
+                        panel = self._music_rematch_panel
                     if job.state == DONE and panel is not None:
                         results = job.result if isinstance(job.result, list) else []
                         panel.set_results(results)
@@ -3427,6 +3775,7 @@ class App(ctk.CTk):
                                 text=f"Results ({len(self.music_results)})",
                             )
                             self._music_update_scroll_footer()
+                            self._music_update_input_stage()
                         else:
                             self.music_results = final
                             self._music_track_count = self._music_track_tally()
@@ -3438,6 +3787,7 @@ class App(ctk.CTk):
                                 self.music_results_header_label.configure(
                                     text=f"Results ({len(final)})",
                                 )
+                                self._music_update_input_stage()
                             else:
                                 self._music_render_results()
                     else:
@@ -3660,7 +4010,7 @@ class App(ctk.CTk):
             self.jobs.clear_recent()  # let JobQueue drop its terminal copies
 
         # Update headers
-        self.active_header.configure(text=f"Active downloads ({len(self._active_rows)})")
+        self.active_header.configure(text=f"Active ({len(self._active_rows)})")
         self._update_recent_header()
 
         self._maybe_log_job_progress(job)
@@ -3942,12 +4292,17 @@ class App(ctk.CTk):
             except Exception:  # noqa: BLE001
                 self._log_popout = None
 
-        if embedded_pinned:
-            self._log_latest_btn.pack_forget()
-        else:
+        show_embedded = (
+            not embedded_pinned
+            and not self._activity_collapsed
+            and self._activity_segment == "log"
+        )
+        if show_embedded:
             self._log_latest_btn.pack(
                 side="right", padx=2, before=self._log_size_btn,
             )
+        else:
+            self._log_latest_btn.pack_forget()
 
         if popout_btn is not None:
             if popout_pinned:
@@ -4036,10 +4391,10 @@ class App(ctk.CTk):
         self._log_size_btn.configure(
             text=_LOG_HEIGHT_LABELS.get(self._log_height, "Size"),
         )
-        if not self._log_collapsed:
-            self._log_outer.configure(height=self._log_expanded_height())
         font = ctk.CTkFont(size=13 if self._log_height != "normal" else 12)
         self.log_box.configure(font=font)
+        if not self._activity_collapsed and self._activity_segment == "log":
+            self._apply_activity_dock_layout()
 
     def _cycle_active_height(self) -> None:
         cycle = list(_LOG_HEIGHT_CYCLE)
@@ -4050,8 +4405,8 @@ class App(ctk.CTk):
         nxt = cycle[(idx + 1) % len(cycle)]
         self.settings.set("panel_active_height", nxt)
         self._active_size_btn.configure(text=nxt.capitalize())
-        if not self._active_collapsed:
-            self._active_outer.configure(height=self._active_expanded_height())
+        if not self._activity_collapsed and self._activity_segment == "active":
+            self._apply_activity_dock_layout()
 
     def _cycle_recent_height(self) -> None:
         cycle = list(_LOG_HEIGHT_CYCLE)
@@ -4062,8 +4417,8 @@ class App(ctk.CTk):
         nxt = cycle[(idx + 1) % len(cycle)]
         self.settings.set("panel_recent_height", nxt)
         self._recent_size_btn.configure(text=nxt.capitalize())
-        if not self._recent_collapsed:
-            self._recent_outer.configure(height=self._recent_expanded_height())
+        if not self._activity_collapsed and self._activity_segment == "recent":
+            self._apply_activity_dock_layout()
 
     def _toggle_active_popout(self) -> None:
         if getattr(self, "_active_popout", None) is not None:
@@ -4074,8 +4429,6 @@ class App(ctk.CTk):
             except Exception:  # noqa: BLE001
                 self._active_popout = None
         self._active_popout = _JobsPopout(self, title="Active downloads", kind="active")
-        # Auto-hide in main window while popped out
-        self._active_outer.pack_forget()
 
     def _toggle_recent_popout(self) -> None:
         if getattr(self, "_recent_popout", None) is not None:
@@ -4086,7 +4439,6 @@ class App(ctk.CTk):
             except Exception:  # noqa: BLE001
                 self._recent_popout = None
         self._recent_popout = _JobsPopout(self, title="Recent", kind="recent")
-        self._recent_outer.pack_forget()
 
     def _toggle_log_popout(self) -> None:
         if self._log_popout is not None:
@@ -4136,9 +4488,13 @@ class App(ctk.CTk):
         else:
             text = f"Recent ({total})"
         self.recent_header.configure(text=text)
-        if failed:
-            self._recent_retry_all_btn.pack(side="right", padx=2,
-                                            before=self._recent_toggle_btn)
+        # Retry btn only when Recent segment actions are visible.
+        if (
+            failed
+            and not self._activity_collapsed
+            and self._activity_segment == "recent"
+        ):
+            self._recent_retry_all_btn.pack(side="right", padx=2)
         else:
             self._recent_retry_all_btn.pack_forget()
 
@@ -4161,42 +4517,6 @@ class App(ctk.CTk):
             row.frame.destroy()
         self._recent_rows.clear()
         self._update_recent_header()
-
-    def _toggle_recent(self) -> None:
-        self._recent_collapsed = not self._recent_collapsed
-        if self._recent_collapsed:
-            self.recent_frame.pack_forget()
-            self._recent_outer.configure(height=self._COLLAPSED_H)
-            self._recent_toggle_btn.configure(text="Show ▸")
-        else:
-            self._recent_outer.configure(height=self._RECENT_EXPANDED_H)
-            self.recent_frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-            self._recent_toggle_btn.configure(text="Hide ▾")
-        self.settings.set("panel_recent_collapsed", self._recent_collapsed)
-
-    def _toggle_active(self) -> None:
-        self._active_collapsed = not self._active_collapsed
-        if self._active_collapsed:
-            self.active_frame.pack_forget()
-            self._active_outer.configure(height=self._COLLAPSED_H)
-            self._active_toggle_btn.configure(text="Show ▸")
-        else:
-            self._active_outer.configure(height=self._ACTIVE_EXPANDED_H)
-            self.active_frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-            self._active_toggle_btn.configure(text="Hide ▾")
-        self.settings.set("panel_active_collapsed", self._active_collapsed)
-
-    def _toggle_log(self) -> None:
-        self._log_collapsed = not self._log_collapsed
-        if self._log_collapsed:
-            self.log_box.pack_forget()
-            self._log_outer.configure(height=self._COLLAPSED_H)
-            self._log_toggle_btn.configure(text="Show log ▸")
-        else:
-            self._log_outer.configure(height=self._log_expanded_height())
-            self.log_box.pack(fill="both", expand=True, padx=6, pady=(2, 6))
-            self._log_toggle_btn.configure(text="Hide log ▾")
-        self.settings.set("panel_log_collapsed", self._log_collapsed)
 
     def _confirm_reset(self) -> None:
         if messagebox.askyesno(
@@ -4221,8 +4541,8 @@ class App(ctk.CTk):
 
     def _on_close(self) -> None:
         try:
-            w = max(900, int(self.winfo_width()))
-            h = max(720, int(self.winfo_height()))
+            w = max(1000, int(self.winfo_width()))
+            h = max(800, int(self.winfo_height()))
             self.settings.set("window_width", w)
             self.settings.set("window_height", h)
         except (TypeError, ValueError, Exception):  # noqa: BLE001
@@ -4325,7 +4645,11 @@ class _MusicAlternateResultRow:
 
 
 class _MusicAlternatePanel:
-    """Expandable YouTube search picker for manually choosing a track match."""
+    """YouTube search picker for manually choosing a track match.
+
+    When ``fill_parent`` is True, expands to fill the Music results body
+    (rematch focus workspace). Otherwise packs as a compact inline panel.
+    """
 
     def __init__(
         self,
@@ -4335,12 +4659,14 @@ class _MusicAlternatePanel:
         *,
         track: MusicTrack | None = None,
         current: SearchResult | None = None,
+        fill_parent: bool = False,
     ) -> None:
         self.app = app
         self.index = index
         self.track = track
         self.current = current
         self._rematch_mode = "track" if track is not None else "search"
+        self._fill_parent = fill_parent
         self._current_url = ""
         if track is not None and track.youtube_url:
             self._current_url = track.youtube_url
@@ -4350,10 +4676,18 @@ class _MusicAlternatePanel:
         self._rows: list[_MusicAlternateResultRow] = []
 
         self.frame = ctk.CTkFrame(parent, fg_color=("gray92", "gray20"))
-        self.frame.pack(fill="x", padx=8, pady=(0, 4))
+        if fill_parent:
+            self.frame.pack(fill="both", expand=True, padx=4, pady=4)
+            self.frame.grid_columnconfigure(0, weight=1)
+            self.frame.grid_rowconfigure(5, weight=1)
+        else:
+            self.frame.pack(fill="x", padx=8, pady=(0, 4))
 
         header = ctk.CTkFrame(self.frame, fg_color="transparent")
-        header.pack(fill="x", padx=8, pady=(6, 2))
+        if fill_parent:
+            header.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 2))
+        else:
+            header.pack(fill="x", padx=8, pady=(6, 2))
         ctk.CTkLabel(
             header, text="Pick alternate YouTube match",
             anchor="w", font=ctk.CTkFont(weight="bold"),
@@ -4361,8 +4695,14 @@ class _MusicAlternatePanel:
         ctk.CTkButton(
             header, text="Close", width=70,
             fg_color="transparent", border_width=1,
-            command=lambda: app._music_toggle_alternate(index),
+            command=lambda: app._music_close_rematch(),
         ).pack(side="right")
+        if self._current_url:
+            ctk.CTkButton(
+                header, text="View match", width=100,
+                fg_color="transparent", border_width=1,
+                command=lambda: webbrowser.open(self._current_url),
+            ).pack(side="right", padx=4)
 
         current_label = ""
         if track is not None and track.youtube_title:
@@ -4373,16 +4713,36 @@ class _MusicAlternatePanel:
             current_label = current.display_title()
             if current.uploader:
                 current_label += f"  ·  {current.uploader}"
+        if track is not None:
+            src = track.display_title()
+            src_lbl = ctk.CTkLabel(
+                self.frame,
+                text=f"Source: {src}",
+                anchor="w",
+                font=ctk.CTkFont(weight="bold"),
+                wraplength=900, justify="left",
+            )
+            if fill_parent:
+                src_lbl.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 2))
+            else:
+                src_lbl.pack(fill="x", padx=10, pady=(0, 2))
         if current_label:
-            ctk.CTkLabel(
+            cur_lbl = ctk.CTkLabel(
                 self.frame,
                 text=f"Current: {current_label}",
                 anchor="w", text_color=("gray40", "gray70"),
-                wraplength=700, justify="left",
-            ).pack(fill="x", padx=10, pady=(0, 4))
+                wraplength=900, justify="left",
+            )
+            if fill_parent:
+                cur_lbl.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 4))
+            else:
+                cur_lbl.pack(fill="x", padx=10, pady=(0, 4))
 
         query_row = ctk.CTkFrame(self.frame, fg_color="transparent")
-        query_row.pack(fill="x", padx=8, pady=(0, 4))
+        if fill_parent:
+            query_row.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 4))
+        else:
+            query_row.pack(fill="x", padx=8, pady=(0, 4))
         if track is not None:
             default_query = " ".join(
                 x for x in (track.artist, track.title) if x
@@ -4414,10 +4774,16 @@ class _MusicAlternatePanel:
             self.frame, text="Searching YouTube…",
             anchor="w", text_color=("gray40", "gray70"),
         )
-        self.status_label.pack(fill="x", padx=10, pady=(0, 4))
-
-        self.results_frame = ctk.CTkScrollableFrame(self.frame, height=200)
-        self.results_frame.pack(fill="x", padx=6, pady=(0, 8))
+        if fill_parent:
+            self.status_label.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 2))
+            self.results_frame = ctk.CTkScrollableFrame(self.frame)
+            self.results_frame.grid(
+                row=5, column=0, sticky="nsew", padx=6, pady=(0, 8),
+            )
+        else:
+            self.status_label.pack(fill="x", padx=10, pady=(0, 4))
+            self.results_frame = ctk.CTkScrollableFrame(self.frame, height=200)
+            self.results_frame.pack(fill="x", padx=6, pady=(0, 8))
 
         app._music_alternate_panels[index] = self
         app.after(
@@ -4465,6 +4831,8 @@ class _MusicAlternatePanel:
     def destroy(self) -> None:
         self._alive = False
         self.app._music_alternate_panels.pop(self.index, None)
+        if self.app._music_rematch_panel is self:
+            self.app._music_rematch_panel = None
         for row in self._rows:
             row.destroy()
         self._rows.clear()
@@ -4484,13 +4852,11 @@ class _MusicTrackRow:
         app: "App",
         *,
         track_index: int,
-        alternate_open: bool = False,
     ) -> None:
         self.track = track
         self.app = app
         self.track_index = track_index
         self._alive = True
-        self._alternate_panel: _MusicAlternatePanel | None = None
 
         self.outer = ctk.CTkFrame(parent, fg_color="transparent")
         self.outer.pack(fill="x", padx=4, pady=3)
@@ -4534,36 +4900,36 @@ class _MusicTrackRow:
         btn_col.pack(side="right", padx=6, pady=4)
 
         if track.is_downloadable():
-            ctk.CTkButton(
-                btn_col, text="View match", width=100,
+            more_btn = ctk.CTkButton(
+                btn_col, text="⋯", width=36,
                 fg_color="transparent", border_width=1,
-                command=lambda: app._music_show_match(track, track_index),
-            ).pack(side="right", padx=2)
+                command=lambda: self._show_row_menu(),
+            )
+            more_btn.pack(side="right", padx=2)
+            self._more_btn = more_btn
             ctk.CTkButton(
                 btn_col, text="Change", width=80,
                 fg_color="transparent", border_width=1,
                 command=lambda: app._music_toggle_alternate(track_index),
             ).pack(side="right", padx=2)
             ctk.CTkButton(
-                btn_col, text="📁", width=44,
-                command=lambda: app._music_download_one_track(track, override=True),
-            ).pack(side="right", padx=2)
-            ctk.CTkButton(
                 btn_col, text="Download", width=110,
                 command=lambda: app._music_download_one_track(track, override=False),
             ).pack(side="right", padx=2)
         elif track.match_status == MATCH_PENDING:
+            self._more_btn = None
             ctk.CTkLabel(
                 btn_col, text="Match first", text_color=("gray40", "gray70"),
             ).pack(side="right", padx=8)
         else:
+            self._more_btn = None
             ctk.CTkButton(
                 btn_col, text="Pick match", width=100,
-                fg_color="transparent", border_width=1,
                 command=lambda: app._music_toggle_alternate(track_index),
             ).pack(side="right", padx=2)
             ctk.CTkButton(
                 btn_col, text="Retry", width=80,
+                fg_color="transparent", border_width=1,
                 command=lambda: app._music_retry_track(track_index),
             ).pack(side="right", padx=2)
 
@@ -4571,10 +4937,17 @@ class _MusicTrackRow:
         if thumb_url:
             self._kick_off_thumb_fetch(thumb_url)
 
-        if alternate_open:
-            self._alternate_panel = _MusicAlternatePanel(
-                self.outer, track_index, app, track=track,
-            )
+    def _show_row_menu(self) -> None:
+        items: list[tuple[str, Callable[[], None]]] = [
+            ("View match", lambda: self.app._music_show_match(
+                self.track, self.track_index,
+            )),
+            ("Download to folder…", lambda: self.app._music_download_one_track(
+                self.track, override=True,
+            )),
+        ]
+        anchor = self._more_btn or self.frame
+        self.app._show_popup_menu(anchor, items)
 
     def _kick_off_thumb_fetch(self, url: str) -> None:
         def _on_loaded(img) -> None:
@@ -4612,9 +4985,6 @@ class _MusicTrackRow:
 
     def destroy(self) -> None:
         self._alive = False
-        if self._alternate_panel is not None:
-            self._alternate_panel.destroy()
-            self._alternate_panel = None
         try:
             self.outer.destroy()
         except Exception:  # noqa: BLE001
@@ -4632,12 +5002,10 @@ class _ResultRow:
         *,
         mode: str = "download",
         result_index: int = 0,
-        alternate_open: bool = False,
     ) -> None:
         self.result = result
         self.app = app
         self._alive = True
-        self._alternate_panel: _MusicAlternatePanel | None = None
 
         if mode == "music":
             if result.kind in ("album", "playlist"):
@@ -4740,11 +5108,6 @@ class _ResultRow:
         # worker thread, so we hop back to the Tk main loop via `after`.
         self._kick_off_thumb_fetch()
 
-        if mode == "music" and alternate_open:
-            self._alternate_panel = _MusicAlternatePanel(
-                self.outer, result_index, app, current=result,
-            )
-
     def update_result(self, result: SearchResult) -> None:
         if not self._alive:
             return
@@ -4799,9 +5162,6 @@ class _ResultRow:
 
     def destroy(self) -> None:
         self._alive = False
-        if self._alternate_panel is not None:
-            self._alternate_panel.destroy()
-            self._alternate_panel = None
         try:
             if hasattr(self, "outer"):
                 self.outer.destroy()
@@ -4923,17 +5283,8 @@ class _JobsPopout(ctk.CTkToplevel):
     def _close(self) -> None:
         if self.kind == "active":
             self.app._active_popout = None
-            # Restore the hidden section in the main window
-            try:
-                self.app._active_outer.pack(side="bottom", fill="x", padx=10, pady=(0, 4))
-            except Exception:  # noqa: BLE001
-                pass
         else:
             self.app._recent_popout = None
-            try:
-                self.app._recent_outer.pack(side="bottom", fill="x", padx=10, pady=(0, 4))
-            except Exception:  # noqa: BLE001
-                pass
         self.destroy()
 
 
@@ -5002,7 +5353,7 @@ class _MatchDetailDialog(ctk.CTkToplevel):
 
     def _change_match(self) -> None:
         self.destroy()
-        self.app._music_toggle_alternate(self.track_index)
+        self.app._music_open_rematch(self.track_index, mode="track")
 
 
 class _MatchReviewDialog(ctk.CTkToplevel):
@@ -5162,14 +5513,27 @@ class _RecentRow:
             self.job = job
         self._refresh()
 
+    def latest_jobs_by_kind(self) -> list[Job]:
+        """Latest attempt per kind — ignores superseded retries."""
+        by_kind: dict[str, Job] = {}
+        for j in self.jobs:
+            prev = by_kind.get(j.kind)
+            if prev is None or j.id > prev.id:
+                by_kind[j.kind] = j
+        return list(by_kind.values())
+
     def has_failed(self) -> bool:
-        return any(j.state == FAILED for j in self.jobs)
+        return any(j.state == FAILED for j in self.latest_jobs_by_kind())
 
     def is_all_cancelled(self) -> bool:
-        return bool(self.jobs) and all(j.state == CANCELLED for j in self.jobs)
+        latest = self.latest_jobs_by_kind()
+        return bool(latest) and all(j.state == CANCELLED for j in latest)
 
     def failed_jobs(self) -> list[Job]:
-        return [j for j in self.jobs if j.state in (FAILED, CANCELLED)]
+        return [
+            j for j in self.latest_jobs_by_kind()
+            if j.state in (FAILED, CANCELLED)
+        ]
 
     def worst_state(self) -> str:
         if self.has_failed():
@@ -5199,7 +5563,7 @@ class _RecentRow:
 
         errors = [
             f"{_RECENT_KIND_LABEL.get(j.kind, j.kind)}: {j.error}"
-            for j in self.jobs
+            for j in self.latest_jobs_by_kind()
             if j.state == FAILED and j.error
         ]
         if errors:
@@ -5227,7 +5591,7 @@ class _RecentRow:
 
 
 # ============================================================================
-# Generic path row used by Settings and Embed tabs
+# Generic path row used by Settings (incl. legacy Embed Thumbnail)
 # ============================================================================
 
 def _path_row(parent, label: str, value: str, on_change: Callable[[str], None],

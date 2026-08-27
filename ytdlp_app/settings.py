@@ -73,22 +73,23 @@ _DEFAULTS: dict[str, Any] = {
     "search_audio_only": False,
 
     # UI collapse state
-    "panel_active_collapsed": False,
+    "panel_active_collapsed": True,  # idle: activity dock collapsed
     "panel_recent_collapsed": True,
     "panel_log_collapsed": True,
     "panel_log_height": "normal",    # "normal" | "large" | "xlarge"
     "panel_active_height": "normal", # "normal" | "large" | "xlarge"
     "panel_recent_height": "normal", # "normal" | "large" | "xlarge"
+    "activity_dock_segment": "active",  # "active" | "recent" | "log"
     "download_input_collapsed": False,
     "music_input_collapsed": False,
     "download_options_collapsed": True,
     "music_options_collapsed": True,
     "music_track_list_expanded": False,
-    "main_tab": "music",             # "music" | "download" | "embed" | "settings"
+    "main_tab": "music",             # "music" | "download" | "settings"
 
     # Main window size (restored on launch)
-    "window_width": 1100,
-    "window_height": 960,
+    "window_width": 1280,
+    "window_height": 1000,
 
     # Default format selection on launch
     "default_audio": True,

@@ -72,6 +72,11 @@ class MusicDownloadResult:
             self.track_infos = []
 
 
+# Prefer clients that still serve downloadable streams without a PO token.
+# Default android_vr often returns 403 on googlevideo after metadata succeeds.
+_YOUTUBE_DOWNLOAD_CLIENTS = ["web_embedded", "mweb", "tv_simply"]
+
+
 def _shared_opts(out_dir: str, cookies_path: str | None, *, verbose: bool = False) -> dict[str, Any]:
     opts: dict[str, Any] = {
         "outtmpl": str(Path(out_dir) / "%(title)s.%(ext)s"),
@@ -81,6 +86,9 @@ def _shared_opts(out_dir: str, cookies_path: str | None, *, verbose: bool = Fals
         "quiet": not verbose,
         "no_warnings": False,
         "verbose": bool(verbose),
+        "extractor_args": {
+            "youtube": {"player_client": list(_YOUTUBE_DOWNLOAD_CLIENTS)},
+        },
     }
     apply_ytdlp_runtime_opts(opts)
     if cookies_path and Path(cookies_path).is_file():
@@ -93,6 +101,7 @@ class _PipeLogger:
 
     def __init__(self, progress: ProgressFn) -> None:
         self._progress = progress
+        self.last_error = ""
 
     def debug(self, msg: str) -> None:
         if msg and not msg.startswith("[debug] "):
@@ -106,6 +115,8 @@ class _PipeLogger:
         self._progress(f"WARN: {msg}")
 
     def error(self, msg: str) -> None:
+        if msg:
+            self.last_error = msg
         self._progress(f"ERROR: {msg}")
 
 
@@ -250,6 +261,7 @@ def _run(
         collect_paths=collect_paths,
         collect_infos=collect_infos,
     )
+    logger = opts.get("logger")
     try:
         url_list = list(urls)
 
@@ -264,7 +276,18 @@ def _run(
         return DownloadResult(success=False, message=str(e))
     except Exception as e:  # noqa: BLE001
         return DownloadResult(success=False, message=f"{type(e).__name__}: {e}")
-    return DownloadResult(success=code == 0, errors=int(code or 0), output_paths=collect_paths or [])
+    message = ""
+    if code != 0:
+        if isinstance(logger, _PipeLogger) and logger.last_error:
+            message = logger.last_error
+        else:
+            message = "download failed — see log"
+    return DownloadResult(
+        success=code == 0,
+        errors=int(code or 0),
+        message=message,
+        output_paths=collect_paths or [],
+    )
 
 
 # ----------------------------- public API --------------------------------- #

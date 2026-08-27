@@ -268,18 +268,18 @@ On first run the launcher automatically:
 
 # Features
 
-> easy-dlp has four main workflows — **Download**, **Music**, **Embed Thumbnail**, and **Settings** — plus always-on job tracking at the bottom of the window.
+> easy-dlp has three main tabs — **Music**, **Video**, and **Settings** — plus an activity dock (Active / Recent / Log) at the bottom of the window. Embed Thumbnail lives under **Settings → Legacy**.
 
 <br>
 
-## Download tab
+## Video tab
 
 Search YouTube or paste URLs, pick your formats, and batch-download with thumbnails and progress tracking.
 
 <p align="center">
-  <img src="docs/screenshots/01-download-tab.png" alt="Download tab" width="900" />
+  <img src="docs/screenshots/01-download-tab.png" alt="Video tab" width="900" />
 </p>
-<p align="center"><em>↑ Screenshot: <code>docs/screenshots/01-download-tab.png</code> — Download tab with search results and format checkboxes</em></p>
+<p align="center"><em>↑ Screenshot: <code>docs/screenshots/01-download-tab.png</code> — Video tab with search results and format checkboxes</em></p>
 
 <br>
 
@@ -407,7 +407,7 @@ Music mode has two input paths:
 
 | Sub-tab | Use for |
 |:---|:---|
-| **Search YouTube** | Find songs by name (same as Download tab, with music-specific filters) |
+| **Search YouTube** | Find songs by name (same as Video tab, with music-specific filters) |
 | **Paste Link** | Paste a playlist, album, or track URL from an external platform |
 
 On **Paste Link**, pick a **Source** from the dropdown:
@@ -442,14 +442,14 @@ Spotify-sourced **album name**, **track number**, and **disc number** are preser
 
 <br>
 
-## Embed Thumbnail tab
+## Embed Thumbnail (legacy)
 
-Add or replace album art on MP3s you already have — single file or entire folders.
+Add or replace album art on MP3s you already have — single file or entire folders. Open **Settings → Legacy** to use this tool (it is no longer a top-level tab).
 
 <p align="center">
-  <img src="docs/screenshots/05-embed-tab.png" alt="Embed Thumbnail tab" width="900" />
+  <img src="docs/screenshots/05-embed-tab.png" alt="Embed Thumbnail (Settings → Legacy)" width="900" />
 </p>
-<p align="center"><em>↑ Screenshot: <code>docs/screenshots/05-embed-tab.png</code> — Embed tab in folder mode with path pickers</em></p>
+<p align="center"><em>↑ Screenshot: <code>docs/screenshots/05-embed-tab.png</code> — Embed Thumbnail in folder mode with path pickers</em></p>
 
 <br>
 
@@ -478,9 +478,9 @@ Downloads never freeze the UI. Search, matching, and downloads run on **separate
 
 <br>
 
-### Active downloads panel
+### Activity dock
 
-Always visible at the bottom of the window. Shows every in-flight job with a **progress bar**, **cancel button**, and live status text. Supports configurable **parallel downloads** (default: 2 concurrent jobs). Search and playlist matching use their own workers, so they don't steal download slots.
+A single bottom strip switches between **Active**, **Recent**, and **Log**. Collapse it when idle to reclaim space; preferences persist across restarts. Active jobs show a **progress bar**, **cancel**, and live status. Parallel downloads are configurable (default: 2); search and matching use their own workers so they don't steal download slots.
 
 ### Fast music search → download
 
@@ -492,22 +492,18 @@ On the Music tab, picking a search result starts the download immediately:
 
 Result rows also render in small batches so the window stays clickable while a large result list fills in. Duplicate checks (folder / Apple Music) run off the UI thread.
 
-### Recent jobs panel
+### Recent jobs
 
-Completed, failed, and cancelled jobs move here automatically. Failed rows are highlighted in red with the error on a separate line. Each failed or cancelled row has **Retry**; the header shows counts (e.g. `Recent (10) — 2 failed — 8 ok`) and **Retry all failed** when needed. Failed jobs sort to the top. Successful rows can open the output folder with **📁**.
-
-### Collapsible panels
-
-Collapse the Active, Recent, or Log panels independently to reclaim screen space. Your collapse preferences persist across restarts.
+Completed, failed, and cancelled jobs move here automatically. Failed rows are highlighted in red with the error on a separate line. Each failed or cancelled row has **Retry**; the header shows counts (e.g. `Recent (10) — 2 failed — 8 ok`) and **Retry all failed** when needed. Failed jobs sort to the top. Successful rows can open the output folder with **📁**. Retry only counts the latest attempt per format, so repeated failures don't stack duplicate Retry buttons.
 
 ### Live log
 
-A scrollable log pane captures per-job output from yt-dlp and ffmpeg — useful for diagnosing failures without opening a terminal.
+A scrollable log captures per-job output from yt-dlp and ffmpeg — useful for diagnosing failures without opening a terminal.
 
 - **Smart scroll** — scrolling up to read older lines no longer jumps you back to the bottom when new lines arrive; click **↓ Latest** to re-pin.
 - **Size** — cycle Normal / Large / X-Large for the embedded log (saved in settings).
 - **Pop out** — open the log in a separate, resizable window that shares the same stream.
-- Duplicate progress spam is suppressed — download status lives in the Active panel progress bar; the log focuses on milestones and errors.
+- Duplicate progress spam is suppressed — download status lives in the Active progress bar; the log focuses on milestones and errors.
 
 <br>
 
@@ -544,6 +540,10 @@ On macOS, easy-dlp reads your system's Natural Scrolling preference. You can als
 
 Choose **Fast (playlists)**, **Balanced**, or **Accurate** for YouTube matching when importing multi-track sources (see [Match quality](#match-quality-playlists) under Music tab).
 
+### Legacy tools
+
+**Embed Thumbnail** (formerly its own tab) is under **Settings → Legacy** for attaching cover art to existing audio files. Prefer the Music tab for new downloads.
+
 ### Settings location
 
 | OS | Path |
@@ -561,11 +561,11 @@ Choose **Fast (playlists)**, **Balanced**, or **Accurate** for YouTube matching 
 # Quick Start
 
 1. Double-click **`easy-dlp`** (Mac) or **`Open easy-dlp.bat`** (Windows) — or run `./run.sh`
-2. Pick a tab — **Download**, **Music**, or **Embed Thumbnail**
-3. **Download tab:** search YouTube or paste video/playlist URLs → pick formats → download
+2. Pick a tab — **Music**, **Video**, or **Settings**
+3. **Video tab:** search YouTube or paste video/playlist URLs → pick formats → download
 4. **Music tab:** search YouTube, paste a YouTube link, or paste a **Spotify** playlist/album URL → match on YouTube → download tagged MP3s
 5. Click **Download** on individual rows, or **Download all**
-6. Watch progress in **Active downloads**; finished jobs appear in **Recent jobs**
+6. Watch progress in the activity dock (**Active** / **Recent** / **Log**)
 
 <br>
 
@@ -575,7 +575,7 @@ Choose **Fast (playlists)**, **Balanced**, or **Accurate** for YouTube matching 
 
 # How to Use
 
-## Download tab
+## Video tab
 
 1. Check one or more formats: **Audio (MP3)**, **Video (MP4)**, **Thumbnail (JPG)**
 2. Search YouTube or paste URLs
