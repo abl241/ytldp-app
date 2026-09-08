@@ -945,27 +945,16 @@ class App(ctk.CTk):
         ).pack(side="left", padx=2)
 
     def _build_music_paste_subtab(self, parent) -> None:
-        top = ctk.CTkFrame(parent, fg_color="transparent")
-        top.pack(fill="x", padx=10, pady=(8, 2))
-
-        ctk.CTkLabel(top, text="Source:", width=60, anchor="w").pack(side="left")
         platform = self.settings.get("music_paste_platform") or "youtube"
         if platform not in PLATFORM_CONFIGS:
             platform = "youtube"
-        self.music_platform_var = ctk.StringVar(value=PLATFORM_CONFIGS[platform].label)
-        self.music_platform_menu = ctk.CTkOptionMenu(
-            top,
-            values=[PLATFORM_CONFIGS[pid].label for pid in PLATFORM_CONFIGS],
-            variable=self.music_platform_var,
-            width=140,
-            command=self._on_music_platform_change,
-        )
-        self.music_platform_menu.pack(side="left", padx=(0, 8))
+        self._music_paste_platform = platform
 
-        self.music_paste_hint_label = ctk.CTkLabel(
-            top, text="", anchor="w", text_color=("gray40", "gray70"),
-        )
-        self.music_paste_hint_label.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            parent,
+            text="Paste a YouTube or Spotify playlist, album, or track URL.",
+            anchor="w", text_color=("gray40", "gray70"),
+        ).pack(fill="x", padx=10, pady=(8, 2))
 
         self.music_paste_box = ctk.CTkTextbox(parent, height=55)
         self.music_paste_box.pack(fill="x", padx=10, pady=4)
@@ -993,6 +982,8 @@ class App(ctk.CTk):
             "1.0", self.settings.get("music_track_list") or "",
         )
 
+        self._apply_music_track_list_ui()
+
         btn_row = ctk.CTkFrame(parent, fg_color="transparent")
         btn_row.pack(fill="x", padx=10, pady=(2, 8))
         ctk.CTkButton(btn_row, text="Resolve", width=100,
@@ -1006,47 +997,72 @@ class App(ctk.CTk):
             side="left", padx=2,
         )
 
-        self._apply_music_platform_ui()
-
     def _music_platform_id(self) -> str:
-        label = self.music_platform_var.get()
-        for pid, cfg in PLATFORM_CONFIGS.items():
-            if cfg.label == label:
-                return pid
-        return "youtube"
+        platform = getattr(self, "_music_paste_platform", None) or (
+            self.settings.get("music_paste_platform") or "youtube"
+        )
+        if platform not in PLATFORM_CONFIGS:
+            return "youtube"
+        return platform
 
-    def _on_music_platform_change(self, _value: str = "") -> None:
-        self.settings.set("music_paste_platform", self._music_platform_id())
-        self._apply_music_platform_ui()
+    def _set_music_paste_platform(self, platform: str) -> None:
+        if platform not in PLATFORM_CONFIGS:
+            platform = "youtube"
+        self._music_paste_platform = platform
+        self.settings.set("music_paste_platform", platform)
 
-    def _apply_music_platform_ui(self) -> None:
-        cfg = platform_config(self._music_platform_id())
-        self.music_paste_hint_label.configure(text=cfg.hint)
+    def _ask_unrecognized_music_platform(self, url: str) -> str | None:
+        """Prompt only when a pasted URL isn't YouTube or Spotify."""
+        choice = messagebox.askyesnocancel(
+            "Unrecognized link",
+            f"Couldn't recognize this link:\n\n{_truncate(url, 120)}\n\n"
+            "Treat it as YouTube or Spotify?\n\n"
+            "Yes = YouTube · No = Spotify · Cancel = abort",
+        )
+        if choice is True:
+            return "youtube"
+        if choice is False:
+            return "spotify"
+        return None
+
+    def _detect_music_paste_platform(
+        self,
+        urls: list[str],
+        track_text: str,
+    ) -> str | None:
+        """Auto-detect YouTube/Spotify; ask only for unrecognized URLs."""
+        if urls:
+            detected = detect_platform(urls[0])
+            if detected:
+                self._set_music_paste_platform(detected)
+                return detected
+            chosen = self._ask_unrecognized_music_platform(urls[0])
+            if not chosen:
+                return None
+            self._set_music_paste_platform(chosen)
+            return chosen
+        if track_text.strip():
+            # Artist/title lists need the Spotify-style text parser + YouTube match.
+            self._set_music_paste_platform("spotify")
+            return "spotify"
+        return None
+
+    def _apply_music_track_list_ui(self) -> None:
         if self._music_track_list_expanded:
             self._music_track_list_toggle_btn.configure(text="▾ Hide track list")
+            self._music_track_list_toggle_btn.pack_forget()
+            self.music_track_list_frame.pack(fill="x", padx=10, pady=(0, 4))
         else:
             self._music_track_list_toggle_btn.configure(text="▸ Paste track list instead")
-        if cfg.supports_text_fallback:
-            if self._music_track_list_expanded:
-                self._music_track_list_toggle_btn.pack_forget()
-                self.music_track_list_frame.pack(fill="x", padx=10, pady=(0, 4))
-            else:
-                self.music_track_list_frame.pack_forget()
-                self._music_track_list_toggle_btn.pack(
-                    fill="x", padx=10, pady=(0, 4),
-                )
-        else:
             self.music_track_list_frame.pack_forget()
-            self._music_track_list_toggle_btn.pack_forget()
+            self._music_track_list_toggle_btn.pack(
+                fill="x", padx=10, pady=(0, 4),
+            )
 
     def _toggle_music_track_list(self) -> None:
         self._music_track_list_expanded = not self._music_track_list_expanded
         self.settings.set("music_track_list_expanded", self._music_track_list_expanded)
-        if self._music_track_list_expanded:
-            self._music_track_list_toggle_btn.configure(text="▾ Hide track list")
-        else:
-            self._music_track_list_toggle_btn.configure(text="▸ Paste track list instead")
-        self._apply_music_platform_ui()
+        self._apply_music_track_list_ui()
 
     # ------------------------- Options collapse (Download / Music) ----------
 
@@ -2216,34 +2232,31 @@ class App(ctk.CTk):
             urls=urls, cookies_path=cookies,
         )
 
-    def _music_do_resolve(self) -> None:
+    def _music_do_resolve(
+        self,
+        *,
+        platform: str | None = None,
+        preserve_auto_download: bool = False,
+    ) -> None:
         text = self.music_paste_box.get("1.0", "end").strip()
         track_text = self.music_track_list_box.get("1.0", "end").strip()
         self.settings.set("music_paste_urls", text)
         self.settings.set("music_track_list", track_text)
         self.settings.set("music_source_tab", "paste")
-        platform = self._music_platform_id()
-        self.settings.set("music_paste_platform", platform)
-        self._music_auto_download = False
+        if not preserve_auto_download:
+            self._music_auto_download = False
 
         urls = [u.strip() for u in text.splitlines() if u.strip() and is_url(u.strip())]
         if not urls and not track_text.strip():
             self._set_status("Paste one or more URLs, or a track list.")
             return
 
-        if urls:
-            detected = detect_platform(urls[0])
-            if detected and detected != platform:
-                cfg = platform_config(detected)
-                if messagebox.askyesno(
-                    "Switch source?",
-                    f"This looks like a {cfg.label} link.\n\n"
-                    f"Switch source to {cfg.label}?",
-                ):
-                    platform = detected
-                    self.music_platform_var.set(cfg.label)
-                    self.settings.set("music_paste_platform", platform)
-                    self._apply_music_platform_ui()
+        if platform is None:
+            platform = self._detect_music_paste_platform(urls, track_text)
+            if not platform:
+                return
+        else:
+            self._set_music_paste_platform(platform)
 
         cookies = self.settings.get("cookies_path") or None
         cfg = platform_config(platform)
@@ -2307,11 +2320,14 @@ class App(ctk.CTk):
         track_text = self.music_track_list_box.get("1.0", "end").strip()
         self.settings.set("music_paste_urls", text)
         self.settings.set("music_track_list", track_text)
-        platform = self._music_platform_id()
 
         urls = [u.strip() for u in text.splitlines() if u.strip() and is_url(u.strip())]
         if not urls and not track_text.strip():
             self._set_status("Paste one or more URLs, or a track list.")
+            return
+
+        platform = self._detect_music_paste_platform(urls, track_text)
+        if not platform:
             return
 
         out_override = None
@@ -2338,7 +2354,7 @@ class App(ctk.CTk):
                 return
             self._music_pending_out_dir = out_dir
             self._music_auto_download = True
-            self._music_do_resolve()
+            self._music_do_resolve(platform=platform, preserve_auto_download=True)
             return
 
         cookies = self.settings.get("cookies_path") or None
